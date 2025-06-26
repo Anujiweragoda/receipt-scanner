@@ -1,8 +1,6 @@
-
-
 import { NextResponse } from 'next/server';
 import dbConnect from '../../../lib/mongodb';
-import Receipt from '../../../models/Receipt';
+import Expense, { ExpenseCategory, PaymentMethod, ExpenseType, ILineItem } from '../../../models/Expense';
 
 // --- Next.js API Route Configuration ---
 export const config = {
@@ -14,31 +12,60 @@ export const config = {
 };
 
 /**
- * Call Gemini API for image analysis and text extraction
+ * Enhanced Gemini analysis for comprehensive expense data extraction
  */
-async function analyzeReceiptWithGemini(base64ImageData: string): Promise<{ vendor: string; date: string; total: number; rawText: string }> {
+async function analyzeReceiptWithGemini(base64ImageData: string): Promise<{
+  vendor: string;
+  vendorAddress?: string;
+  vendorPhone?: string;
+  date: string;
+  receiptNumber?: string;
+  subtotal: number;
+  tax: number;
+  tip?: number;
+  discount?: number;
+  total: number;
+  currency: string;
+  category: ExpenseCategory;
+  paymentMethod: PaymentMethod;
+  lineItems: ILineItem[];
+  rawText: string;
+  confidence: number;
+}> {
   const geminiApiKey = process.env.GEMINI_API_KEY;
-  
+
   if (!geminiApiKey) {
     throw new Error('GEMINI_API_KEY is not defined');
   }
 
   const prompt = `
-    Analyze this receipt image and extract the following information:
-    1. Vendor/Store name
-    2. Date of purchase (format as YYYY-MM-DD)
-    3. Total amount (as a number)
+    Analyze this receipt image and extract comprehensive information. Return the data in this exact JSON format:
 
-    Return the information in this exact format:
-    VENDOR: [store name]
-    DATE: [YYYY-MM-DD]
-    TOTAL: [amount as number]
-    RAWTEXT: [all text you can see in the image]
-
-    If you cannot find specific information, use:
-    - VENDOR: Unknown Vendor
-    - DATE: ${new Date().getFullYear()}-01-01
-    - TOTAL: 0.00
+    {
+      "vendor": "[store/restaurant name]",
+      "vendorAddress": "[address if visible]",
+      "vendorPhone": "[phone if visible]",
+      "date": "[YYYY-MM-DD format]",
+      "receiptNumber": "[receipt/transaction number if visible]",
+      "subtotal": [subtotal amount as number],
+      "tax": [tax amount as number],
+      "tip": [tip amount as number or null],
+      "discount": [discount amount as number or null],
+      "total": [total amount as number],
+      "currency": "[currency code, default USD]",
+      "category": "[categorize as one of: Food & Dining, Groceries, Transportation, Utilities, Entertainment, Healthcare, Shopping, Travel, Education, Business, Home & Maintenance, Subscriptions, Insurance, Taxes, Gifts & Donations, Personal Care, Other]",
+      "paymentMethod": "[Credit Card, Debit Card, Cash, Bank Transfer, Digital Wallet, Check, or Other]",
+      "lineItems": [
+        {
+          "name": "[item name]",
+          "quantity": [quantity as number],
+          "unitPrice": [price per unit as number],
+          "totalPrice": [total for this item as number]
+        }
+      ],
+      "rawText": "[all visible text from receipt]",
+      "confidence": [confidence score 0.0-1.0 for OCR accuracy]
+    }
   `;
 
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`, {
@@ -49,15 +76,8 @@ async function analyzeReceiptWithGemini(base64ImageData: string): Promise<{ vend
     body: JSON.stringify({
       contents: [{
         parts: [
-          {
-            text: prompt
-          },
-          {
-            inline_data: {
-              mime_type: "image/jpeg",
-              data: base64ImageData
-            }
-          }
+          { text: prompt },
+          { inline_data: { mime_type: 'image/jpeg', data: base64ImageData } }
         ]
       }]
     })
@@ -70,22 +90,59 @@ async function analyzeReceiptWithGemini(base64ImageData: string): Promise<{ vend
   const data = await response.json();
   const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
-  // Parse the structured response
-  const vendorMatch = responseText.match(/VENDOR:\s*(.+)/);
-  const dateMatch = responseText.match(/DATE:\s*(.+)/);
-  const totalMatch = responseText.match(/TOTAL:\s*(.+)/);
-  const rawTextMatch = responseText.match(/RAWTEXT:\s*([\s\S]*)/);
+  try {
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsedData = JSON.parse(jsonMatch[0]);
+      
+      return {
+        vendor: parsedData.vendor || 'Unknown Vendor',
+        vendorAddress: parsedData.vendorAddress || undefined,
+        vendorPhone: parsedData.vendorPhone || undefined,
+        date: parsedData.date || new Date().toISOString().split('T')[0],
+        receiptNumber: parsedData.receiptNumber || undefined,
+        subtotal: parseFloat(parsedData.subtotal) || 0,
+        tax: parseFloat(parsedData.tax) || 0,
+        tip: parsedData.tip ? parseFloat(parsedData.tip) : undefined,
+        discount: parsedData.discount ? parseFloat(parsedData.discount) : undefined,
+        total: parseFloat(parsedData.total) || 0,
+        currency: parsedData.currency || 'USD',
+        category: Object.values(ExpenseCategory).includes(parsedData.category)
+          ? parsedData.category
+          : ExpenseCategory.OTHER,
+        paymentMethod: Object.values(PaymentMethod).includes(parsedData.paymentMethod)
+          ? parsedData.paymentMethod
+          : PaymentMethod.OTHER,
+        lineItems: Array.isArray(parsedData.lineItems) ? parsedData.lineItems.map((item: any) => ({
+          name: item.name || 'Unknown Item',
+          quantity: parseFloat(item.quantity) || 1,
+          unitPrice: parseFloat(item.unitPrice) || 0,
+          totalPrice: parseFloat(item.totalPrice) || 0
+        })) : [],
+        rawText: parsedData.rawText || responseText,
+        confidence: Math.min(Math.max(parseFloat(parsedData.confidence) || 0.5, 0), 1)
+      };
+    }
+  } catch (parseError) {
+    console.warn('Failed to parse JSON response, using fallback parsing');
+  }
 
-  const vendor = vendorMatch ? vendorMatch[1].trim() : 'Unknown Vendor';
-  const dateStr = dateMatch ? dateMatch[1].trim() : `${new Date().getFullYear()}-01-01`;
-  const totalStr = totalMatch ? totalMatch[1].trim() : '0.00';
-  const rawText = rawTextMatch ? rawTextMatch[1].trim() : responseText;
+  const vendorMatch = responseText.match(/(?:vendor|store):\s*(.+)/i);
+  const dateMatch = responseText.match(/date:\s*(.+)/i);
+  const totalMatch = responseText.match(/total:\s*([0-9.]+)/i);
 
   return {
-    vendor,
-    date: dateStr,
-    total: parseFloat(totalStr) || 0.00,
-    rawText
+    vendor: vendorMatch ? vendorMatch[1].trim() : 'Unknown Vendor',
+    date: dateMatch ? dateMatch[1].trim() : new Date().toISOString().split('T')[0],
+    subtotal: 0,
+    tax: 0,
+    total: totalMatch ? parseFloat(totalMatch[1]) : 0,
+    currency: 'USD',
+    category: ExpenseCategory.OTHER,
+    paymentMethod: PaymentMethod.OTHER,
+    lineItems: [],
+    rawText: responseText,
+    confidence: 0.3
   };
 }
 
@@ -93,53 +150,100 @@ async function analyzeReceiptWithGemini(base64ImageData: string): Promise<{ vend
  * Handles POST requests to the /api/scan-receipt endpoint.
  */
 export async function POST(request: Request) {
-  // Ensure database connection is established
   await dbConnect();
+  const body = await request.json();
 
-  // Extract imageUrl (Base64 string) from the request body
-  const { imageUrl } = await request.json();
+  const isManual = body.manual === true;
 
+  if (isManual) {
+    // Manual expense saving
+    try {
+      const newExpense = await Expense.create({
+        vendor: body.vendor || 'Manual Entry',
+        vendorAddress: body.vendorAddress || '',
+        vendorPhone: body.vendorPhone || '',
+        date: new Date(body.date),
+        receiptNumber: body.receiptNumber || '',
+        subtotal: parseFloat(body.subtotal) || 0,
+        tax: parseFloat(body.tax) || 0,
+        tip: parseFloat(body.tip) || 0,
+        discount: parseFloat(body.discount) || 0,
+        total: parseFloat(body.total) || 0,
+        currency: body.currency || 'USD',
+        category: body.category || ExpenseCategory.OTHER,
+        paymentMethod: body.paymentMethod || PaymentMethod.OTHER,
+        expenseType: ExpenseType.PERSONAL,
+        lineItems: body.lineItems || [],
+        notes: body.notes || '',
+        description: body.description || '',
+        tags: body.tags || [],
+        isRecurring: body.isRecurring || false,
+        recurringFrequency: body.recurringFrequency || '',
+        rawText: body.rawText || '',
+        imageUrl: body.imageUrl || '',
+        confidence: 1,
+        isBusinessExpense: body.isBusinessExpense || false,
+        isTaxDeductible: body.isTaxDeductible || false,
+        projectId: body.projectId || '',
+        clientId: body.clientId || '',
+        source: 'manual',
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+
+      return NextResponse.json({ success: true, data: newExpense }, { status: 201 });
+
+    } catch (err) {
+      console.error('Manual save error:', err);
+      return NextResponse.json({ success: false, message: 'Failed to save manual entry.' }, { status: 500 });
+    }
+  }
+
+  // --- SCANNED RECEIPT FLOW ---
+  const { imageUrl } = body;
   if (!imageUrl) {
     return NextResponse.json({ success: false, message: 'No image data provided.' }, { status: 400 });
   }
 
-  // Check for Gemini API key
-  if (!process.env.GEMINI_API_KEY) {
-    return NextResponse.json(
-      { success: false, message: 'Gemini API key is not configured.' },
-      { status: 500 }
-    );
-  }
-
-  // Extract Base64 data without the data URL prefix
   const base64ImageData = imageUrl.split(',')[1];
 
   try {
-    // Analyze receipt with Gemini
     const extractedData = await analyzeReceiptWithGemini(base64ImageData);
-    
-    console.log('Extracted data:', extractedData);
 
-    // Save to MongoDB
-    const newReceipt = await Receipt.create({
+    const newExpense = await Expense.create({
       vendor: extractedData.vendor,
+      vendorAddress: extractedData.vendorAddress,
+      vendorPhone: extractedData.vendorPhone,
       date: new Date(extractedData.date),
+      receiptNumber: extractedData.receiptNumber,
+      subtotal: extractedData.subtotal,
+      tax: extractedData.tax,
+      tip: extractedData.tip,
+      discount: extractedData.discount,
       total: extractedData.total,
+      currency: extractedData.currency,
+      category: extractedData.category,
+      paymentMethod: extractedData.paymentMethod,
+      expenseType: ExpenseType.PERSONAL,
+      lineItems: extractedData.lineItems,
+      tags: [],
+      isRecurring: false,
       rawText: extractedData.rawText,
-      imageUrl: imageUrl, // Store the full data URL
+      imageUrl: imageUrl,
+      confidence: extractedData.confidence,
+      isBusinessExpense: false,
+      isTaxDeductible: false,
+      source: 'scan',
       createdAt: new Date(),
+      updatedAt: new Date()
     });
 
-    // Return success response
-    return NextResponse.json({ 
-      success: true, 
-      data: newReceipt 
-    }, { status: 201 });
+    return NextResponse.json({ success: true, data: newExpense }, { status: 201 });
 
   } catch (error: any) {
-    console.error('API Error:', error);
+    console.error('Scan processing error:', error);
     return NextResponse.json(
-      { success: false, message: 'Failed to process receipt. Please try again.' },
+      { success: false, message: 'Failed to process receipt.' },
       { status: 500 }
     );
   }
