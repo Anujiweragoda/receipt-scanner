@@ -9,7 +9,13 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@google-ai/generativelanguage": "^3.2.0",
+    "@google-cloud/vision": "^5.2.0",
+    "@google/generative-ai": "^0.24.1",
+    "classnames": "^2.5.1",
+    "mongoose": "^8.16.0",
     "next": "15.3.4",
+    "prisma": "^6.10.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-icons": "^5.5.0"
