@@ -11,7 +11,7 @@ const NavBar = () => {
 
   const links = [
     { label: 'Receipt Scanner', href: '/receipt' }, // Use descriptive labels
-    { label: 'Finance Tracker', href: '/FinanceTracker' },
+    { label: 'Finance Tracker', href: '/financeTracker' },
   ];
 
   return (

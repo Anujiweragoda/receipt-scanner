@@ -12,6 +12,28 @@ export const config = {
 };
 
 /**
+ * Handles GET requests to fetch all expenses
+ */
+export async function GET() {
+  try {
+    await dbConnect();
+    
+    // Fetch all expenses, sorted by date (most recent first)
+    const expenses = await Expense.find({})
+      .sort({ date: -1 })
+      .lean(); // Use lean() for better performance when just reading data
+
+    return NextResponse.json(expenses, { status: 200 });
+  } catch (error: any) {
+    console.error('Error fetching expenses:', error);
+    return NextResponse.json(
+      { success: false, message: 'Failed to fetch expenses.' },
+      { status: 500 }
+    );
+  }
+}
+
+/**
  * Enhanced Gemini analysis for comprehensive expense data extraction
  */
 async function analyzeReceiptWithGemini(base64ImageData: string): Promise<{
